@@ -51,13 +51,10 @@ export async function GET(request: Request) {
 
   const callbackParams = new URL(request.url).searchParams;
   const state = callbackParams.get("state");
-  if (!state || state.length > 512) {
-    return redirectToApp("/dashboard?binance=failed");
-  }
 
   try {
     if (callbackParams.has("error")) {
-      await cancelBinanceMcpAuthorization(user.uid, state);
+      await cancelBinanceMcpAuthorization(user.uid, state ?? "");
       return redirectToApp("/dashboard?binance=cancelled");
     }
 

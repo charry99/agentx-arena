@@ -17,6 +17,8 @@ import {
 } from "@/lib/submission-store";
 import BinanceMcpConnectionCard from "./binance-mcp-connection";
 import AdminBountyReview from "./admin-bounty-review";
+import AdminRoleRequests from "./admin-role-requests";
+import RoleRequestCard from "./role-request-card";
 import SponsorBountyManager from "./sponsor-bounty-manager";
 
 type ProfileSummary = {
@@ -149,12 +151,19 @@ async function AuthenticatedDashboard() {
 
         <BinanceMcpConnectionCard />
 
+        {profileStatus === "loaded" && profile?.role === "agent" && (
+          <RoleRequestCard />
+        )}
+
         {profileStatus === "loaded" && profile?.role === "sponsor" && (
           <SponsorBountyManager />
         )}
 
         {profileStatus === "loaded" && profile?.role === "admin" && (
-          <AdminBountyReview />
+          <>
+            <AdminRoleRequests />
+            <AdminBountyReview />
+          </>
         )}
 
         <section className="glass-panel rounded-3xl p-6 lg:col-span-2">

@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { isServerFirebaseConfigured } from "@/lib/firebase-admin";
 
 export async function GET() {
+  // Read environment state per request instead of at build time.
+  await connection();
   const configured = isServerFirebaseConfigured();
 
   return NextResponse.json({

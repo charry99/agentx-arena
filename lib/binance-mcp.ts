@@ -249,6 +249,22 @@ function getPendingExpiry(data: Record<string, unknown>) {
     : 0;
 }
 
+async function failBinanceMcpAuthorization(
+  uid: string,
+  flowId: string,
+  error: unknown,
+): Promise<never> {
+  try {
+    await markBinanceMcpConnectionUnavailable(uid, flowId);
+  } catch (cleanupError) {
+    console.error(
+      "Failed to reset the Binance MCP connection after an error.",
+      cleanupError instanceof Error ? cleanupError.name : "Unknown error",
+    );
+  }
+  throw error;
+}
+
 function serializeUpdatedAt(value: unknown) {
   if (value instanceof Timestamp) return value.toDate().toISOString();
   if (value instanceof Date) return value.toISOString();
@@ -434,69 +450,87 @@ export async function completeBinanceMcpAuthorization(
   if (
     !snapshot.exists ||
     data?.status !== "pending" ||
-    typeof data.flowId !== "string" ||
-    getPendingExpiry(data) <= Date.now()
+    typeof data.flowId !== "string"
   ) {
     throw new Error("The Binance authorization flow is missing or expired.");
   }
 
-  const oauthState = decryptSession(data.encryptedOAuthSession);
-  const callbackState = callbackParams.get("state");
-  if (
-    !callbackState ||
-    !oauthState.state ||
-    !constantTimeEqual(callbackState, oauthState.state)
-  ) {
-    throw new Error("The Binance authorization state is invalid.");
-  }
-
   const flowId = data.flowId;
-  const provider = new BinanceOAuthProvider(oauthState);
-  const authTransport = new StreamableHTTPClientTransport(
-    new URL(BINANCE_MCP_ENDPOINT),
-    { authProvider: provider },
-  );
-  await authTransport.finishAuth(callbackParams);
+  let oauthState: OAuthSessionState;
+  try {
+    if (getPendingExpiry(data) <= Date.now()) {
+      throw new Error("The Binance authorization flow is missing or expired.");
+    }
 
-  if (!provider.tokens()?.access_token) {
-    throw new Error("Binance authorization did not return an access token.");
+    oauthState = decryptSession(data.encryptedOAuthSession);
+    const callbackState = callbackParams.get("state");
+    if (
+      !callbackState ||
+      callbackState.length > 512 ||
+      !oauthState.state ||
+      !constantTimeEqual(callbackState, oauthState.state)
+    ) {
+      throw new Error("The Binance authorization state is invalid.");
+    }
+  } catch (error) {
+    return failBinanceMcpAuthorization(uid, flowId, error);
   }
-
-  const client = new Client({ name: "agentx-arena", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(
-    new URL(BINANCE_MCP_ENDPOINT),
-    { authProvider: provider },
-  );
 
   try {
-    await client.connect(transport);
-    const { tools } = await client.listTools();
-    const authorizedScopes = getScopes(provider.tokens());
-    const readOnlyTools = getReadOnlyToolNames(tools);
+    const provider = new BinanceOAuthProvider(oauthState);
+    const authTransport = new StreamableHTTPClientTransport(
+      new URL(BINANCE_MCP_ENDPOINT),
+      { authProvider: provider },
+    );
+    await authTransport.finishAuth(callbackParams);
 
-    await db.runTransaction(async (transaction) => {
-      const current = await transaction.get(ref);
-      if (
-        current.data()?.status !== "pending" ||
-        current.data()?.flowId !== flowId
-      ) {
-        throw new Error("The Binance authorization flow is no longer active.");
-      }
-      transaction.update(ref, {
-        status: "connected",
-        authorizedScopes,
-        readOnlyTools,
-        encryptedOAuthSession: encryptSession(provider.persistedState),
-        connectedAt: FieldValue.serverTimestamp(),
-        flowId: FieldValue.delete(),
-        pendingExpiresAt: FieldValue.delete(),
-        updatedAt: FieldValue.serverTimestamp(),
+    if (!provider.tokens()?.access_token) {
+      throw new Error("Binance authorization did not return an access token.");
+    }
+
+    const client = new Client({ name: "agentx-arena", version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(BINANCE_MCP_ENDPOINT),
+      { authProvider: provider },
+    );
+
+    try {
+      await client.connect(transport);
+      const { tools } = await client.listTools();
+      const authorizedScopes = getScopes(provider.tokens());
+      const readOnlyTools = getReadOnlyToolNames(tools);
+
+      await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(ref);
+        if (
+          current.data()?.status !== "pending" ||
+          current.data()?.flowId !== flowId
+        ) {
+          throw new Error("The Binance authorization flow is no longer active.");
+        }
+        transaction.update(ref, {
+          status: "connected",
+          authorizedScopes,
+          readOnlyTools,
+          encryptedOAuthSession: encryptSession(provider.persistedState),
+          connectedAt: FieldValue.serverTimestamp(),
+          flowId: FieldValue.delete(),
+          pendingExpiresAt: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
       });
-    });
-
-    await transport.terminateSession();
-  } finally {
-    await client.close();
+    } finally {
+      try {
+        // Best effort: the connection is already stored, so a failure to end
+        // the MCP session must not be reported as a failed authorization.
+        await transport.terminateSession();
+      } catch {
+        // Ignore servers that do not support explicit session termination.
+      }
+      await client.close();
+    }
+  } catch (error) {
+    return failBinanceMcpAuthorization(uid, flowId, error);
   }
 }
 
@@ -508,32 +542,44 @@ export async function cancelBinanceMcpAuthorization(
   if (!db) throw new Error("Firebase Admin Firestore is not available.");
 
   const ref = connectionRef(db, uid);
-  await db.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(ref);
-    const data = snapshot.data();
-    if (
-      data?.status !== "pending" ||
-      typeof data.flowId !== "string" ||
-      getPendingExpiry(data) <= Date.now()
-    ) {
-      throw new Error("The Binance authorization flow is missing or expired.");
-    }
+  let flowId: string | undefined;
+  try {
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      const data = snapshot.data();
+      if (data?.status !== "pending" || typeof data.flowId !== "string") {
+        throw new Error("The Binance authorization flow is missing or expired.");
+      }
 
-    const oauthState = decryptSession(data.encryptedOAuthSession);
-    if (!oauthState.state || !constantTimeEqual(callbackState, oauthState.state)) {
-      throw new Error("The Binance authorization state is invalid.");
-    }
+      flowId = data.flowId;
+      if (getPendingExpiry(data) <= Date.now()) {
+        throw new Error("The Binance authorization flow is missing or expired.");
+      }
 
-    transaction.update(ref, {
-      status: "disconnected",
-      authorizedScopes: [],
-      readOnlyTools: [],
-      encryptedOAuthSession: FieldValue.delete(),
-      pendingExpiresAt: FieldValue.delete(),
-      flowId: FieldValue.delete(),
-      updatedAt: FieldValue.serverTimestamp(),
+      const oauthState = decryptSession(data.encryptedOAuthSession);
+      if (
+        !callbackState ||
+        callbackState.length > 512 ||
+        !oauthState.state ||
+        !constantTimeEqual(callbackState, oauthState.state)
+      ) {
+        throw new Error("The Binance authorization state is invalid.");
+      }
+
+      transaction.update(ref, {
+        status: "disconnected",
+        authorizedScopes: [],
+        readOnlyTools: [],
+        encryptedOAuthSession: FieldValue.delete(),
+        pendingExpiresAt: FieldValue.delete(),
+        flowId: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
     });
-  });
+  } catch (error) {
+    if (!flowId) throw error;
+    return failBinanceMcpAuthorization(uid, flowId, error);
+  }
 }
 
 export async function markBinanceMcpConnectionUnavailable(

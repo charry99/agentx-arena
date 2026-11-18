@@ -8,6 +8,7 @@ export const firestoreCollections = {
   activity: "activity",
   agentIdentities: "agentIdentities",
   binanceMcpConnections: "binanceMcpConnections",
+  roleRequests: "roleRequests",
 } as const;
 
 export const userDocumentSchema = {
@@ -84,4 +85,16 @@ export const submissionDocumentSchema = {
   evaluationScore: "number | null",
   status: "submitted | queued | approved | rejected",
   createdAt: "timestamp",
+};
+
+export const roleRequestDocumentSchema = {
+  userId: "string (document id)",
+  requestedRole: "sponsor",
+  status: "pending | approved | rejected",
+  message: "string | null",
+  reviewedBy: "string | null",
+  reviewedAt: "timestamp | null",
+  reviewNote: "string | null",
+  createdAt: "timestamp",
+  updatedAt: "timestamp",
 };

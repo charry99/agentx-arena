@@ -1,7 +1,10 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { getRuntimeConfigSummary } from "@/lib/runtime-config";
 
 export async function GET() {
+  // Read environment state per request. Without this, Cache Components
+  // prerenders the handler at build time and serves a stale snapshot.
+  await connection();
   const summary = getRuntimeConfigSummary();
 
   return NextResponse.json({

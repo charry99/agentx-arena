@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { isServerFirebaseConfigured } from "@/lib/firebase-admin";
 
 export async function GET() {
+  await connection();
   return NextResponse.json({
     ok: true,
     app: "BINANCE AGENT LAUNCHPAD",

@@ -54,6 +54,13 @@ function parseConnection(value: unknown): ConnectionSummary {
   };
 }
 
+const CALLBACK_MESSAGES: Record<string, string> = {
+  connected: "Binance MCP authorization completed.",
+  cancelled: "Binance authorization was cancelled.",
+  failed: "Binance authorization failed. Please try connecting again.",
+  unavailable: "Binance authorization is unavailable right now.",
+};
+
 function getErrorMessage(value: unknown, fallback: string) {
   return isRecord(value) && typeof value.error === "string"
     ? value.error
@@ -83,7 +90,19 @@ export default function BinanceMcpConnectionCard() {
         if (!isRecord(result)) {
           throw new Error("The Binance connection status response is invalid.");
         }
-        if (active) setConnection(parseConnection(result.connection));
+        if (active) {
+          setConnection(parseConnection(result.connection));
+          const callbackResult = new URLSearchParams(window.location.search).get(
+            "binance",
+          );
+          const callbackMessage = callbackResult
+            ? CALLBACK_MESSAGES[callbackResult]
+            : undefined;
+          if (callbackMessage) {
+            setMessage(callbackMessage);
+            window.history.replaceState(null, "", window.location.pathname);
+          }
+        }
       } catch (error) {
         if (active) {
           setMessage(
